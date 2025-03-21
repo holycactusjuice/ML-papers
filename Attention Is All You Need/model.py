@@ -1,21 +1,28 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import torch.optim as optim
 from collections import OrderedDict
+from matplotlib import pyplot as plt
+import time
 
-# dimension values
+# Hyperparameters
 batch_size = 4
 block_size = 8
 n_embd = 32
 n_head = 4
 d_k = 32
 d_v = d_k
+n_block = 4
+dropout = 0.0
+learning_rate = 1e-3
+max_iters = 100000
 
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 with open('shakespeare.txt', 'r', encoding='utf-8') as f:
     text = f.read()
-
+    
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
 
@@ -29,7 +36,7 @@ data = torch.tensor(encode(text), dtype=torch.long)
 
 n = int(0.9 * len(data))
 train_data = data[:n]
-val_data = data[:n]
+val_data = data[n:]
 
 def get_batch(split):
     # need to get batch_size number of samples
@@ -37,9 +44,7 @@ def get_batch(split):
     split_data = train_data if split == 'train' else val_data
 
     # get batch_size number of starting indicies
-    ix = torch.randint(len(split_data) - block_size, (batch_size,))
-
-    print(ix.shape)
+    ix = torch.randint(len(split_data) - block_size - 1, (batch_size,))
 
     # for each i in ix,
     # i is the starting index
@@ -48,11 +53,14 @@ def get_batch(split):
     # y is just the element after each x
     y = torch.stack([split_data[i+1:i+block_size+1] for i in ix])
 
+    x, y = x.to(device), y.to(device)
+
     return x, y
 
 class Head(nn.Module):
 
     def __init__(self, n_embd, n_head, block_size, dropout=0.1):
+        super().__init__()
         
         self.n_embd = n_embd
         self.n_head = n_head
@@ -68,6 +76,7 @@ class Head(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, X):
+        B, T, C = X.shape
         # essentially doing X @ W_Q
         # dims are (B, T, C) @ (T, n_embd) -> (B, T, n_embd)
         Q = self.query(X)
@@ -97,7 +106,7 @@ class Head(nn.Module):
         # we want the values in the key dimension to become probabilities,
         # so we softmax over the second T
         # ----- ANSWER: The key dimension, -1 -----
-        weights = weights.softmax(dim=-1)
+        weights = F.softmax(weights, dim=-1)
         weights = self.dropout(weights)
         out = weights @ V
 
@@ -177,13 +186,14 @@ class Block(nn.Module):
         X = X + self.feedforward(self.ln2(X))
         return X
     
-class Transformer(nn.Module):
+class LanguageModel(nn.Module):
 
-    def __init__(self, vocab_size, n_embd, n_head, block_size, n_encoder):
+    def __init__(self, vocab_size, n_embd, n_head, block_size, n_block):
+        super().__init__()
 
-        self.embedding_table = nn.Embedding(vocab_size, n_embd)
-        # LEAVING OUT THE POSITION ENCODING FOR NOW
-        self.blocks = nn.Sequential([Block(n_embd, n_head, block_size) for _ in range(n_encoder)])
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd) # Needs same dimensions as input after token embedding
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head, block_size) for _ in range(n_block)]) # Need to unpack list
         # After the blocks, the dim is (B, T, n_embd)
         # We want to project this to probabiliites for the next character, so we need (n_embd, vocab_size)
         # ----- QUESTION: Why is the T dimension still here and what does it represent? -----
@@ -193,8 +203,9 @@ class Transformer(nn.Module):
         self.projection = nn.Linear(n_embd, vocab_size)
 
     def forward(self, X):
+        B, T = X.shape
         # (B, T)
-        X_embd = self.embedding_table(X)
+        X_embd = self.token_embedding_table(X) + self.position_embedding_table(torch.arange(T, device=device))
         # (B, T, n_embd)
         X_blocks = self.blocks(X_embd)
         # (B, T, n_embd)
@@ -203,3 +214,56 @@ class Transformer(nn.Module):
         # probs = logits.softmax(dim=-1)
         # (B, T, vocab_size)
         return logits
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens):
+        # Keep in mind that idx is a sequence of encoded values
+        for _ in range(max_new_tokens):
+            # We can only take up to block_size, so crop idx
+            # Don't forget about the batch dimension, even though it's 1
+            idx_cropped = idx[:, -block_size:]
+            logits = self(idx_cropped)
+            # We will sample from the last time step
+            # Keep in mind that logits is now (B, T, C)
+            logits = logits[:, -1, :]
+            # We want to softmax over the probabilities
+            probs = F.softmax(logits, dim=-1)
+            # Sample
+            next_idx = torch.multinomial(probs, num_samples=1)
+            # idx has dim (B, T)
+            # next_idx has dim (B, 1)
+            # So we need to concatenate over the last dim
+            idx = torch.cat((idx, next_idx), dim=-1)
+        return idx
+    
+if __name__ == "__main__":
+    
+    model = LanguageModel(vocab_size, n_embd, n_head, block_size, n_block)
+    model.to(device)
+
+    # create a PyTorch optimizer
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    
+    context = torch.zeros((1, 1), dtype=torch.long, device=device)
+
+    start_time = time.time()
+    for iter in range(1, max_iters + 1):
+        xb, yb = get_batch('train')
+        logits = model(xb)
+        loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), yb.view(-1))
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        if iter % 1000 == 0:
+            print(f"iter {iter}/{max_iters}: loss {loss.item()}")
+
+        if iter % 5000 == 0:
+            out = model.generate(context, max_new_tokens=500)
+            print(decode(out[0].tolist()))
+            print('---')
+            
+    # Save model
+    torch.save(model.state_dict(), 'model.pth')
+            
+    print(f"Average time per 1000 iterations: {(time.time() - start_time) / (max_iters / 1000)} seconds")
