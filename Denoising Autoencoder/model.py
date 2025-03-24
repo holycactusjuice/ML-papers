@@ -11,9 +11,11 @@ from torchvision.utils import make_grid
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 # HYPERPARAMETERS
-batch_size = 64
+batch_size = 16
 learning_rate = 1e-3
-max_iters = 10000
+num_epochs = 20
+
+noise_factor = 0.3
 
 transform = transforms.Compose([
     transforms.ToTensor(), # Converts the inputs to tensors, scales the values to [0,1]
@@ -74,4 +76,92 @@ def visualize_grid(tensor, name):
     plt.axis('off')
     plt.savefig(f'{name}.png')
 
-    
+# TRAINING
+model = DenoisingAutoencoder().to(device)
+
+# Loss function
+criterion = nn.MSELoss()
+
+# Optimizer
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+# Training loop
+train_loss_data = []
+test_loss_data = []
+
+model.train()
+# for i in range(1, max_iters+1):
+for epoch in range(num_epochs):
+    for batch_idx, (xb, _) in enumerate(train_loader):
+        # Move data to device
+        xb = xb.to(device)
+
+        # Add noise
+        xb_noisy = xb + noise_factor * torch.randn(*xb.shape, device=device)
+        xb_noisy = torch.clamp(xb_noisy, min=0, max=1)
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        # Forward pass
+        output = model(xb_noisy)
+
+        # Calculate loss
+        loss = criterion(output, xb)
+
+        # Backward pass
+        loss.backward()
+
+        # Update weights
+        optimizer.step()
+
+        # Update loss data
+        train_loss_data.append(loss.item())
+
+    # Print progress
+    print(f"Epoch [{epoch+1}/{num_epochs}] | Loss: {loss.item():.4f}")
+
+# Save model
+torch.save(model.state_dict(), 'model.pth')
+
+# TESTING
+model.eval()
+
+with torch.no_grad():
+    for batch_idx, (xb, _) in enumerate(test_loader):
+        xb = xb.to(device)
+
+        # Add noise
+        xb_noisy = xb + noise_factor * torch.randn(*xb.shape, device=device)
+        xb_noisy = torch.clamp(xb_noisy, min=0, max=1)
+
+        # Forward pass
+        output = model(xb_noisy)
+
+        # Calculate loss
+        loss = criterion(output, xb)
+
+        # Update loss data
+        test_loss_data.append(loss.item())   
+
+# Display test loss
+print(f"Test Loss: {np.mean(test_loss_data):.4f}")
+
+# Visualize results
+model.eval()
+
+# Get a batch of test data
+xb, _ = next(iter(test_loader))
+xb = xb.to(device)
+
+# Add noise
+xb_noisy = xb + noise_factor * torch.randn(*xb.shape, device=device)
+xb_noisy = torch.clamp(xb_noisy, min=0, max=1)
+
+# Forward pass
+output = model(xb_noisy)
+
+# Visualize results
+visualize_grid(xb, 'original')
+visualize_grid(xb_noisy, 'noisy')
+visualize_grid(output, 'reconstructed')
