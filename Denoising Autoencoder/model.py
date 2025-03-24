@@ -17,7 +17,6 @@ max_iters = 10000
 
 transform = transforms.Compose([
     transforms.ToTensor(), # Converts the inputs to tensors, scales the values to [0,1]
-    # transforms.Normalize((0.5,), (0.5,)), # Shifts and scales the mean and standard deviation
 ])
 
 train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
@@ -38,25 +37,22 @@ class DenoisingAutoencoder(nn.Module):
             # It applies 16 different 3x3 kernels with stride 1
             # We add a padding of 1 for the edges (If we had 5x5 kernels, we should use padding of 2)
 
-            # Input dim is (1, 28, 28)
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
-            # Dim is (16, 28, 28), (one for each kernel)
+            # Dim is (B, 1, 28, 28)
+            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            # Dim is (B, 32, 28, 28)
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # Kernel size of 2, stride of 2
-            # Dim is halved to (16, 14, 14)
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            # Dim is (32, 14, 14)
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Dim is (B, 32, 14, 14)
+            nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1),
+            # Dim is (B, 16, 14, 14)
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-            # Dim is halved to (32, 7, 7)
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Dim is (B, 8, 7, 7)
         )
         self.decoder = nn.Sequential(
-            # Input dim is (32, 7, 7) (output of encoder)
-            nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2),
-            # Dim is doubled to (32, 14, 14)
+            nn.ConvTranspose2d(16, 32, kernel_size=2, stride=2),
             nn.ReLU(),
-            nn.ConvTranspose2d(16, 1, kernel_size=2, stride=2),
-            # Dim is doubled to (32, 28, 28)
+            nn.ConvTranspose2d(32, 1, kernel_size=2, stride=2),
             nn.Sigmoid() # End with sigmoid since we want to output numbers in [0,1]
         )
             
@@ -67,12 +63,7 @@ class DenoisingAutoencoder(nn.Module):
         x = self.decoder(x)
         return x
     
-def visualize_grid(tensor):
-    # Unnormalize pixel values
-    # mean = 0.5
-    # std = 0.5
-    # tensor = tensor * std + mean
-    
+def visualize_grid(tensor, name):
     grid = make_grid(tensor)
 
     image = grid.cpu().numpy()
@@ -81,6 +72,6 @@ def visualize_grid(tensor):
 
     plt.imshow(image)
     plt.axis('off')
-    plt.show()
+    plt.savefig(f'{name}.png')
 
     
